@@ -43,9 +43,9 @@ def main():
     # os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
     # os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
-    os.chdir(Path('~/Internship/PyCharm_projects/habitat-lab/').expanduser())
+    os.chdir(Path('~/Internship/PyCharm_projects/habitat_2.3/habitat-lab/').expanduser())
 
-    path_config = str(Path('~/Internship/PyCharm_projects/habitat-phosphenes/'
+    path_config = str(Path('~/Internship/PyCharm_projects/habitat_2.3/habitat-phosphenes/'
                            'ppo_pointnav_phosphenes_complete.yaml').expanduser())
 
     _config = phosphenes.get_config(path_config)

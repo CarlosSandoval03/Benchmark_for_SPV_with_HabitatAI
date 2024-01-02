@@ -480,7 +480,10 @@ class PPOTrainer(BaseRLTrainer):
 
         self._agent.train()
 
+        # del os.environ["CUBLAS_WORKSPACE_CONFIG"]
         losses = self._agent.updater.update(self._agent.rollouts)
+        # os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
         self._agent.rollouts.after_update()
 
         self._agent.after_update()

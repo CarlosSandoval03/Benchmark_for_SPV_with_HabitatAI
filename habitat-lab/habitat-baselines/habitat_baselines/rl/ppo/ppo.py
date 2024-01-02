@@ -24,6 +24,7 @@ from habitat_baselines.utils.common import (
     LagrangeInequalityCoefficient,
     inference_mode,
 )
+from habitat_baselines.utils.timing import g_timer
 
 EPS_PPO = 1e-5
 
@@ -157,6 +158,7 @@ class PPO(nn.Module, Updater):
             for p in pg["params"]:
                 p.grad = None
 
+    @g_timer.avg_time("ppo.update_from_batch", level=1)
     def _update_from_batch(self, batch, epoch, rollouts, learner_metrics):
         """
         Performs a gradient update from the minibatch.
@@ -184,7 +186,7 @@ class PPO(nn.Module, Updater):
             batch["prev_actions"],
             batch["masks"],
             batch["actions"],
-            batch["rnn_build_seq_info"],
+            batch.get("rnn_build_seq_info", None),
         )
 
         ratio = torch.exp(action_log_probs - batch["action_log_probs"])
@@ -245,7 +247,9 @@ class PPO(nn.Module, Updater):
         total_loss = torch.stack(all_losses).sum()
 
         total_loss = self.before_backward(total_loss)
+        # torch.use_deterministic_algorithms(False)
         total_loss.backward()
+        # torch.use_deterministic_algorithms(True)
         self.after_backward(total_loss)
 
         grad_norm = self.before_step()
@@ -303,7 +307,7 @@ class PPO(nn.Module, Updater):
 
         for epoch in range(self.ppo_epoch):
             profiling_wrapper.range_push("PPO.update epoch")
-            data_generator = rollouts.recurrent_generator(
+            data_generator = rollouts.data_generator(
                 advantages, self.num_mini_batch
             )
 
@@ -326,6 +330,7 @@ class PPO(nn.Module, Updater):
                 for k, vs in learner_metrics.items()
             }
 
+    @g_timer.avg_time("ppo.eval_actions", level=1)
     def _evaluate_actions(self, *args, **kwargs):
         r"""Internal method that calls Policy.evaluate_actions.  This is used instead of calling
         that directly so that that call can be overrided with inheritance
