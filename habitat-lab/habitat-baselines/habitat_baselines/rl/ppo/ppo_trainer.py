@@ -10,13 +10,26 @@ import random
 import time
 from collections import defaultdict, deque
 from typing import Any, Dict, List, Optional
+# from matplotlib.patches import StepPatch
 
 import numpy as np
 import torch
 import tqdm
+from gym import spaces
+from torch import nn
+from torch.optim.lr_scheduler import LambdaLR
+
+#added
+from PIL import Image
+import matplotlib.pyplot as plt
+import copy
+import pdb
+from habitat_baselines.common.tensor_dict import TensorDict
+
 from omegaconf import OmegaConf
 
-from habitat import VectorEnv, logger
+from habitat import VectorEnv, logger, get_config
+from habitat.core.environments import get_env_class
 from habitat.config import read_write
 from habitat.config.default import get_agent_config
 from habitat.tasks.rearrange.rearrange_sensors import GfxReplayMeasure
@@ -24,17 +37,21 @@ from habitat.tasks.rearrange.utils import write_gfx_replay
 from habitat.utils import profiling_wrapper
 from habitat.utils.visualizations.utils import (
     observations_to_image,
+    observations_to_image_decoder,
     overlay_frame,
 )
 from habitat_baselines.common.base_trainer import BaseRLTrainer
 from habitat_baselines.common.baseline_registry import baseline_registry
 from habitat_baselines.common.construct_vector_env import construct_envs
 from habitat_baselines.common.env_spec import EnvironmentSpec
+from habitat_baselines.rl.ver.ver_rollout_storage import VERRolloutStorage
 from habitat_baselines.common.obs_transformers import (
     apply_obs_transforms_batch,
     apply_obs_transforms_obs_space,
     get_active_obs_transforms,
+    apply_obs_transforms_batch_video,
 )
+from habitat_baselines.common.rollout_storage import RolloutStorage
 from habitat_baselines.common.tensorboard_utils import (
     TensorboardWriter,
     get_writer,
@@ -42,6 +59,7 @@ from habitat_baselines.common.tensorboard_utils import (
 from habitat_baselines.rl.ddppo.algo import DDPPO  # noqa: F401.
 from habitat_baselines.rl.ddppo.ddp_utils import (
     EXIT,
+    add_signal_handlers,
     get_distrib_size,
     init_distrib_slurm,
     is_slurm_batch_job,
@@ -53,12 +71,14 @@ from habitat_baselines.rl.ddppo.ddp_utils import (
 from habitat_baselines.rl.ddppo.policy import PointNavResNetNet
 from habitat_baselines.rl.ppo.agent_access_mgr import AgentAccessMgr
 from habitat_baselines.rl.ppo.policy import NetPolicy
+from habitat_baselines.rl.ppo import PPO
 from habitat_baselines.rl.ppo.single_agent_access_mgr import (  # noqa: F401.
     SingleAgentAccessMgr,
 )
 from habitat_baselines.utils.common import (
     batch_obs,
     generate_video,
+    get_num_actions,
     get_action_space_info,
     inference_mode,
     is_continuous_action_space,
@@ -69,6 +89,8 @@ from habitat_baselines.utils.info_dict import (
     extract_scalars_from_infos,
 )
 
+# Added E2E
+from phosphenes import E2E_Decoder
 
 @baseline_registry.register_trainer(name="ddppo")
 @baseline_registry.register_trainer(name="ppo")
@@ -110,7 +132,31 @@ class PPOTrainer(BaseRLTrainer):
         return t.to(device=orig_device)
 
     def _create_obs_transforms(self):
+        # I need to create the transformations here because if not then when
+        # initiating training the transforms and decoder does not exist,
+        # I also need to move it to cuda (device) so I don't get errors in
+        # the phosphenes
         self.obs_transforms = get_active_obs_transforms(self.config)
+
+        # Start E2E block
+        if any('Encoder' in str(transform) for transform in self.obs_transforms):
+            obs_trans_cls = baseline_registry.get_obs_transformer(
+                "E2E_Decoder")
+            if obs_trans_cls is None:
+                raise ValueError(
+                    f"Unkown ObservationTransform with name E2E_Decoder."
+                )
+            self.decoder = obs_trans_cls.from_config({"type": "E2E_Decoder"})
+
+            self.decoder.to(self.device)
+
+            encoder_index = next((i for i, transform in enumerate(self.obs_transforms) if 'Encoder' in str(transform)), None)
+            encoder_index = int(encoder_index)
+
+            self.obs_transforms[encoder_index].model.to(self.device)
+            self.obs_transforms[encoder_index+1].gaussian.to(self.device)
+        # End E2E block
+
         self._env_spec.observation_space = apply_obs_transforms_obs_space(
             self._env_spec.observation_space, self.obs_transforms
         )
@@ -120,7 +166,6 @@ class PPOTrainer(BaseRLTrainer):
         Sets up the AgentAccessMgr. You still must call `agent.post_init` after
         this call. This only constructs the object.
         """
-
         self._create_obs_transforms()
         return baseline_registry.get_agent_access_mgr(
             self.config.habitat_baselines.rl.agent.type
@@ -132,6 +177,8 @@ class PPOTrainer(BaseRLTrainer):
             resume_state=resume_state,
             num_envs=self.envs.num_envs,
             percent_done_fn=self.percent_done,
+            obs_transforms=self.obs_transforms, # Added E2E (for only 1 instance)
+            decoder=self.decoder, # Added E2E (for only 1 instance)
             **kwargs,
         )
 
@@ -239,11 +286,11 @@ class PPOTrainer(BaseRLTrainer):
             os.makedirs(self.config.habitat_baselines.checkpoint_folder)
 
         logger.add_filehandler(self.config.habitat_baselines.log_file)
-
         self._agent = self._create_agent(resume_state)
+
         if self._is_distributed:
             self._agent.updater.init_distributed(find_unused_params=False)  # type: ignore
-        self._agent.post_init()
+        self._agent.post_init()  # Rollouts originally created inside here
 
         self._is_static_encoder = (
             not self.config.habitat_baselines.rl.ddppo.train_encoder
@@ -252,12 +299,17 @@ class PPOTrainer(BaseRLTrainer):
 
         observations = self.envs.reset()
         batch = batch_obs(observations, device=self.device)
-        batch = apply_obs_transforms_batch(batch, self.obs_transforms)  # type: ignore
+
+        # Changed for E2E block ("with" statement)
+        with torch.no_grad():
+            batch = apply_obs_transforms_batch(batch, self.obs_transforms)  # type: ignore
+
+        # batch = apply_obs_transforms_batch(batch, self.obs_transforms)  # type: ignore
 
         if self._is_static_encoder:
             assert isinstance(self._agent.actor_critic, NetPolicy)
             self._encoder = self._agent.actor_critic.net.visual_encoder
-            with inference_mode():
+            with torch.no_grad():
                 batch[
                     PointNavResNetNet.PRETRAINED_VISUAL_FEATURES_KEY
                 ] = self._encoder(batch)
@@ -323,6 +375,63 @@ class PPOTrainer(BaseRLTrainer):
         """
         return torch.load(checkpoint_path, *args, **kwargs)
 
+    # Start E2E block
+    @rank0_only
+    @profiling_wrapper.RangeContext("save_checkpoint")
+    def save_checkpoint_phosphene(
+        self, file_name: str, extra_state: Optional[Dict] = None
+    ) -> None:
+        r"""Save checkpoint with specified name.
+
+        Args:
+            file_name: file name for checkpoint
+
+        Returns:
+            None
+        """
+        encoder_index = next(
+            (i for i, transform in enumerate(self.obs_transforms) if
+             'Encoder' in str(transform)), None)
+        encoder_index = int(encoder_index)
+
+        checkpoint = {
+            **self._agent.get_save_state(),
+            "state_dict_encoder": self.obs_transforms[encoder_index].state_dict(),
+            "state_dict_simulator": self.obs_transforms[encoder_index+1].state_dict(),
+            "state_dict_decoder": self.decoder.state_dict(),
+            "config": self.config,
+        }
+        if extra_state is not None:
+            checkpoint["extra_state"] = extra_state  # type: ignore
+
+        torch.save(
+            checkpoint,
+            os.path.join(
+                self.config.habitat_baselines.checkpoint_folder, file_name
+            ),
+        )
+        torch.save(
+            checkpoint,
+            os.path.join(
+                self.config.habitat_baselines.checkpoint_folder, "latest.pth"
+            ),
+        )
+
+    def load_checkpoint_phosphene(self, checkpoint_path: str, *args,
+                                  **kwargs) -> Dict:
+        r"""Load checkpoint of specified path as a dict.
+
+        Args:
+            checkpoint_path: path of target checkpoint
+            *args: additional positional args
+            **kwargs: additional keyword args
+
+        Returns:
+            dict containing checkpoint info
+        """
+        return torch.load(checkpoint_path, *args, **kwargs)
+    # End E2E block
+
     def _compute_actions_and_step_envs(self, buffer_index: int = 0):
         num_envs = self.envs.num_envs
         env_slice = slice(
@@ -333,18 +442,34 @@ class PPOTrainer(BaseRLTrainer):
         t_sample_action = time.time()
 
         # Sample actions
-        with inference_mode():
+        with torch.no_grad():
             step_batch = self._agent.rollouts.get_current_step(
                 env_slice, buffer_index
             )
 
-            profiling_wrapper.range_push("compute actions")
-            action_data = self._agent.actor_critic.act(
-                step_batch["observations"],
-                step_batch["recurrent_hidden_states"],
-                step_batch["prev_actions"],
-                step_batch["masks"],
-            )
+            # Start E2E block
+            # The change is the inclusion of the if, the content of
+            # the else section remains the same
+            if any('Encoder' in str(transform) for transform in self.obs_transforms):
+                profiling_wrapper.range_push("compute actions")
+                action_data = self._agent.actor_critic.act_e2e(
+                    self.obs_transforms,
+                    step_batch["observations_orig"],
+                    step_batch["recurrent_hidden_states"],
+                    step_batch["prev_actions"],
+                    step_batch["masks"],
+                    self.decoder,
+                    act=True
+                )
+            else:
+                profiling_wrapper.range_push("compute actions")
+                action_data = self._agent.actor_critic.act(
+                    step_batch["observations"],
+                    step_batch["recurrent_hidden_states"],
+                    step_batch["prev_actions"],
+                    step_batch["masks"],
+                )
+            # End E2E block
 
         self.pth_time += time.time() - t_sample_action
 
@@ -369,14 +494,36 @@ class PPOTrainer(BaseRLTrainer):
 
         self.env_time += time.time() - t_step_env
 
-        self._agent.rollouts.insert(
-            next_recurrent_hidden_states=action_data.rnn_hidden_states,
-            actions=action_data.actions,
-            action_log_probs=action_data.action_log_probs,
-            value_preds=action_data.values,
-            buffer_index=buffer_index,
-            should_inserts=action_data.should_inserts,
-        )
+        # self._agent.rollouts.insert(
+        #     next_recurrent_hidden_states=action_data.rnn_hidden_states,
+        #     actions=action_data.actions,
+        #     action_log_probs=action_data.action_log_probs,
+        #     value_preds=action_data.values,
+        #     buffer_index=buffer_index,
+        #     should_inserts=action_data.should_inserts,
+        # )
+
+        # Start E2E block
+        if any('Encoder' in str(transform) for transform in self.obs_transforms):  # no sure if needed
+            # print('inserte2e compute')
+            self._agent.rollouts.insert_e2e(
+                next_recurrent_hidden_states=action_data.rnn_hidden_states,
+                actions=action_data.actions,
+                action_log_probs=action_data.action_log_probs,
+                value_preds=action_data.values,
+                buffer_index=buffer_index,
+                should_inserts=action_data.should_inserts,
+            )
+        else:
+            self._agent.rollouts.insert(
+                next_recurrent_hidden_states=action_data.rnn_hidden_states,
+                actions=action_data.actions,
+                action_log_probs=action_data.action_log_probs,
+                value_preds=action_data.values,
+                buffer_index=buffer_index,
+                should_inserts=action_data.should_inserts,
+            )
+        # End E2E block
 
     def _collect_environment_result(self, buffer_index: int = 0):
         num_envs = self.envs.num_envs
@@ -399,7 +546,12 @@ class PPOTrainer(BaseRLTrainer):
 
         t_update_stats = time.time()
         batch = batch_obs(observations, device=self.device)
-        batch = apply_obs_transforms_batch(batch, self.obs_transforms)  # type: ignore
+        # Start E2E block
+        batch_orig = copy.deepcopy(batch)
+        with torch.no_grad():
+            batch = apply_obs_transforms_batch(batch, self.obs_transforms)  # This line remained the same. I was out of the "with" block
+        # End E2E block
+        # batch = apply_obs_transforms_batch(batch, self.obs_transforms) # Original (No E2E)
 
         rewards = torch.tensor(
             rewards_l,
@@ -434,17 +586,35 @@ class PPOTrainer(BaseRLTrainer):
         self.current_episode_reward[env_slice].masked_fill_(done_masks, 0.0)
 
         if self._is_static_encoder:
-            with inference_mode():
+            with torch.no_grad():
                 batch[
                     PointNavResNetNet.PRETRAINED_VISUAL_FEATURES_KEY
                 ] = self._encoder(batch)
 
-        self._agent.rollouts.insert(
-            next_observations=batch,
-            rewards=rewards,
-            next_masks=not_done_masks,
-            buffer_index=buffer_index,
-        )
+        # self._agent.rollouts.insert(
+        #     next_observations=batch,
+        #     rewards=rewards,
+        #     next_masks=not_done_masks,
+        #     buffer_index=buffer_index,
+        # )
+
+        # Start E2E block
+        if any('Encoder' in str(transform) for transform in self.obs_transforms):
+            self._agent.rollouts.insert_e2e(
+                next_observations_orig=batch_orig,
+                next_observations=batch,
+                rewards=rewards,
+                next_masks=not_done_masks,
+                buffer_index=buffer_index,
+            )
+        else:
+            self._agent.rollouts.insert(
+                next_observations=batch,
+                rewards=rewards,
+                next_masks=not_done_masks,
+                buffer_index=buffer_index,
+            )
+        # End E2E block
 
         self._agent.rollouts.advance_rollout(buffer_index)
 
@@ -461,15 +631,28 @@ class PPOTrainer(BaseRLTrainer):
     def _update_agent(self):
         t_update_model = time.time()
 
-        with inference_mode():
+        with torch.no_grad():
             step_batch = self._agent.rollouts.get_last_step()
 
-            next_value = self._agent.actor_critic.get_value(
-                step_batch["observations"],
-                step_batch["recurrent_hidden_states"],
-                step_batch["prev_actions"],
-                step_batch["masks"],
-            )
+            # Start E2E block
+            if any('Encoder' in str(transform) for transform in self.obs_transforms):
+                next_value = self._agent.actor_critic.get_value_e2e(
+                    self.obs_transforms,
+                    step_batch["observations"],
+                    step_batch["recurrent_hidden_states"],
+                    step_batch["prev_actions"],
+                    step_batch["masks"],
+                    self.decoder,
+                    act=True,
+                )
+            else:
+                next_value = self._agent.actor_critic.get_value(
+                    step_batch["observations"],
+                    step_batch["recurrent_hidden_states"],
+                    step_batch["prev_actions"],
+                    step_batch["masks"],
+                )
+            # End E2E block
 
         self._agent.rollouts.compute_returns(
             next_value,
@@ -480,7 +663,26 @@ class PPOTrainer(BaseRLTrainer):
 
         self._agent.train()
 
-        losses = self._agent.updater.update(self._agent.rollouts)
+        # Start E2E block
+        if any('Encoder' in str(transform) for transform in self.obs_transforms):
+            encoder_index = next(
+                (i for i, transform in enumerate(self.obs_transforms) if
+                 'Encoder' in str(transform)), None)
+            encoder_index = int(encoder_index)
+            self.obs_transforms[encoder_index].train()
+            self.obs_transforms[encoder_index+1].train()
+            self.decoder.train()
+        # End E2E block
+
+        # Start E2E block
+        if any('Encoder' in str(transform) for transform in self.obs_transforms):
+            losses = self._agent.updater.update_e2e(
+                self._agent.rollouts
+            )
+        else:
+            losses = self._agent.updater.update(self._agent.rollouts)
+        # End E2E block
+
         self._agent.rollouts.after_update()
 
         self._agent.after_update()
@@ -693,6 +895,18 @@ class PPOTrainer(BaseRLTrainer):
                     return
 
                 self._agent.eval()
+
+                # Start E2E block
+                if any('Encoder' in str(transform) for transform in self.obs_transforms):
+                    encoder_index = next(
+                        (i for i, transform in enumerate(self.obs_transforms)
+                         if 'Encoder' in str(transform)), None)
+                    encoder_index = int(encoder_index)
+                    self.obs_transforms[encoder_index].eval()
+                    self.obs_transforms[encoder_index+1].eval()
+                    self.decoder.eval()
+                # End E2E block
+
                 count_steps_delta = 0
                 profiling_wrapper.range_push("rollouts loop")
 
@@ -730,7 +944,7 @@ class PPOTrainer(BaseRLTrainer):
                 if self._is_distributed:
                     self.num_rollouts_done_store.add("num_done", 1)
 
-                losses = self._update_agent()
+                losses = self._update_agent() # From here it goes to the update_e2e functions in ppo.py
 
                 self.num_updates_done += 1
                 losses = self._coalesce_post_step(
@@ -749,6 +963,59 @@ class PPOTrainer(BaseRLTrainer):
                             wall_time=(time.time() - self.t_start) + prev_time,
                         ),
                     )
+
+                    # Start E2E block
+                    if any('Encoder' in str(transform) for transform in self.obs_transforms):
+                        self.save_checkpoint_phosphene(
+                            f"ckpt_phos.{count_checkpoints}.pth",
+                            dict(
+                                step=self.num_steps_done,
+                                wall_time=(time.time() - self.t_start) + prev_time,
+                            ),
+                        )
+                    """ # Comment the part where gradients are plotted (for speed)
+                        # check grads
+                        for model in self.obs_transforms:
+                            # print('model', model)
+                            for tag, value in model.named_parameters():
+                                # print('tag', tag)
+                                if value.grad is not None:
+                                    # print('grad tag', tag)
+                                    writer.add_histogram(
+                                        f"{str(model)[:6]}/grads/{tag}",
+                                        value.grad.cpu(),
+                                        self.num_updates_done)  # or num_steps_done?
+                                    writer.add_histogram(
+                                        f"{str(model)[:6]}/weights/{tag}",
+                                        value.data.cpu(),
+                                        self.num_updates_done)
+
+                        for tag, value in self._agent.actor_critic.named_parameters():
+                            # print('tag', tag)
+                            if value.grad is not None:
+                                # print('grad tag', tag)
+                                writer.add_histogram(f"{'net'}/grads/{tag}",
+                                                     value.grad.cpu(),
+                                                     self.num_updates_done)  # or num_steps_done?
+                                writer.add_histogram(f"{'net'}/weights/{tag}",
+                                                     value.data.cpu(),
+                                                     self.num_updates_done)
+
+                        for tag, value in self.decoder.named_parameters():
+                            if value.grad is not None:
+                                if value.grad.min() is not None:
+                                    print('DECODER tag', tag, 'grad', value.grad.min(), value.grad.max())
+                                # print('grad tag ', tag)
+                                writer.add_histogram(
+                                    f"{'decoder'}/grads/{tag}",
+                                    value.grad.cpu(),
+                                    self.num_updates_done)  # or num_steps_done?
+                                writer.add_histogram(
+                                    f"{'decoder'}/weights/{tag}",
+                                    value.data.cpu(), self.num_updates_done)
+                    """
+                    # End E2E block
+
                     count_checkpoints += 1
 
                 profiling_wrapper.range_pop()  # train update
@@ -771,6 +1038,24 @@ class PPOTrainer(BaseRLTrainer):
         Returns:
             None
         """
+        checkpoint_path_phos = ""
+        aux_directory, aux_filename = os.path.split(checkpoint_path)
+        if "_phos" not in aux_filename:
+            first_dot_index = aux_filename.find('.')
+            if first_dot_index != -1:
+                checkpoint_path_phos = aux_directory + "/" + aux_filename[:first_dot_index] + "_phos" + aux_filename[first_dot_index:]
+            else:
+                checkpoint_path_phos = checkpoint_path
+            print('checkpoint_path_phos', checkpoint_path_phos)
+        else:
+            checkpoint_path_phos = checkpoint_path
+
+        print('checkpoint_path_phos', checkpoint_path_phos)
+
+        self.checkpoint_path = checkpoint_path
+        self.checkpoint_path_phosphene = checkpoint_path_phos
+        # End E2E block
+
         if self._is_distributed:
             raise RuntimeError("Evaluation does not support distributed mode")
 
@@ -785,6 +1070,9 @@ class PPOTrainer(BaseRLTrainer):
             print(step_id)
         else:
             ckpt_dict = {"config": None}
+
+        # Added E2E line
+        self.ckpt_dict = ckpt_dict
 
         config = self._get_resume_state_config_or_new_config(
             ckpt_dict["config"]
@@ -819,11 +1107,33 @@ class PPOTrainer(BaseRLTrainer):
         )
 
         if self._agent.actor_critic.should_load_agent_state:
+            # Start E2E block
+            if any('Encoder' in str(transform) for transform in self.obs_transforms):
+                encoder_index = next(
+                    (i for i, transform in enumerate(self.obs_transforms) if
+                     'Encoder' in str(transform)), None)
+                encoder_index = int(encoder_index)
+
+                ckpt_dict_phosphene = self.load_checkpoint(
+                    checkpoint_path_phos, map_location="cpu"
+                )
+                print('loaded encoder checkpoint')
+                self.obs_transforms[encoder_index].load_state_dict(
+                    ckpt_dict_phosphene["state_dict_encoder"])
+                self.obs_transforms[encoder_index+1].load_state_dict(
+                    ckpt_dict_phosphene["state_dict_simulator"])
+                self.decoder.load_state_dict(
+                    ckpt_dict_phosphene["state_dict_decoder"])
+            # End E2E block
             self._agent.load_state_dict(ckpt_dict)
 
         observations = self.envs.reset()
         batch = batch_obs(observations, device=self.device)
-        batch = apply_obs_transforms_batch(batch, self.obs_transforms)  # type: ignore
+        # Start E2E block
+        # batch = apply_obs_transforms_batch(batch, self.obs_transforms)  # type: ignore
+        with torch.no_grad():
+            batch, _ = apply_obs_transforms_batch_video(batch, self.obs_transforms, self.decoder)
+        # End E2E block
 
         current_episode_reward = torch.zeros(
             self.envs.num_envs, 1, device="cpu"
@@ -883,34 +1193,77 @@ class PPOTrainer(BaseRLTrainer):
 
         pbar = tqdm.tqdm(total=number_of_eval_episodes * evals_per_ep)
         self._agent.eval()
+
+        # Start E2E block
+        if any('Encoder' in str(transform) for transform in self.obs_transforms):
+            encoder_index = next(
+                (i for i, transform in enumerate(self.obs_transforms) if
+                 'Encoder' in str(transform)), None)
+            encoder_index = int(encoder_index)
+            self.obs_transforms[encoder_index].eval()
+            self.obs_transforms[encoder_index+1].eval()
+            self.decoder.eval()
+        # end E2E block
+
         while (
             len(stats_episodes) < (number_of_eval_episodes * evals_per_ep)
             and self.envs.num_envs > 0
         ):
             current_episodes_info = self.envs.current_episodes()
 
-            with inference_mode():
-                action_data = self._agent.actor_critic.act(
-                    batch,
-                    test_recurrent_hidden_states,
-                    prev_actions,
-                    not_done_masks,
-                    deterministic=False,
-                )
-                if action_data.should_inserts is None:
-                    test_recurrent_hidden_states = (
-                        action_data.rnn_hidden_states
+            # Start E2E block
+            if any('Encoder' in str(transform) for transform in self.obs_transforms):
+                with torch.no_grad():
+                    action_data = self._agent.actor_critic.act_e2e(
+                        self.obs_transforms,
+                        batch,
+                        test_recurrent_hidden_states,
+                        prev_actions,
+                        not_done_masks,
+                        self.decoder,
+                        act=True,
+                        deterministic=False,
                     )
-                    prev_actions.copy_(action_data.actions)  # type: ignore
-                else:
-                    for i, should_insert in enumerate(
-                        action_data.should_inserts
-                    ):
-                        if should_insert.item():
-                            test_recurrent_hidden_states[
-                                i
-                            ] = action_data.rnn_hidden_states[i]
-                            prev_actions[i].copy_(action_data.actions[i])  # type: ignore
+                    if action_data.should_inserts is None:
+                        test_recurrent_hidden_states = (
+                            action_data.rnn_hidden_states
+                        )
+                        prev_actions.copy_(action_data.actions)  # type: ignore
+                    else:
+                        for i, should_insert in enumerate(
+                            action_data.should_inserts
+                        ):
+                            if should_insert.item():
+                                test_recurrent_hidden_states[
+                                    i
+                                ] = action_data.rnn_hidden_states[i]
+                                prev_actions[i].copy_(action_data.actions[i])  # type: ignore
+            else:
+                with torch.no_grad():
+                    action_data = self._agent.actor_critic.act(
+                        batch,
+                        test_recurrent_hidden_states,
+                        prev_actions,
+                        not_done_masks,
+                        deterministic=False,
+                    )
+                    if action_data.should_inserts is None:
+                        test_recurrent_hidden_states = (
+                            action_data.rnn_hidden_states
+                        )
+                        prev_actions.copy_(action_data.actions)  # type: ignore
+                    else:
+                        for i, should_insert in enumerate(
+                            action_data.should_inserts
+                        ):
+                            if should_insert.item():
+                                test_recurrent_hidden_states[
+                                    i
+                                ] = action_data.rnn_hidden_states[i]
+                                prev_actions[i].copy_(
+                                    action_data.actions[i])  # type: ignore
+            # End E2E block
+
             # NB: Move actions to CPU.  If CUDA tensors are
             # sent in to env.step(), that will create CUDA contexts
             # in the subprocesses.
@@ -941,7 +1294,11 @@ class PPOTrainer(BaseRLTrainer):
                 observations,
                 device=self.device,
             )
-            batch = apply_obs_transforms_batch(batch, self.obs_transforms)  # type: ignore
+
+            # Start E2E block
+            with torch.no_grad():
+                batch, _ = apply_obs_transforms_batch_video(batch, self.obs_transforms, self.decoder)  # type: ignore
+            # End E2E block
 
             not_done_masks = torch.tensor(
                 [[not done] for done in dones],

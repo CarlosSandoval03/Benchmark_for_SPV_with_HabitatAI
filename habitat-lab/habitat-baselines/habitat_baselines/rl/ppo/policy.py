@@ -30,6 +30,8 @@ from habitat_baselines.utils.common import (
 if TYPE_CHECKING:
     from omegaconf import DictConfig
 
+from habitat_baselines.utils.timing import g_timer
+
 
 @dataclass
 class PolicyActionData:
@@ -246,11 +248,59 @@ class NetPolicy(nn.Module, Policy):
             rnn_hidden_states=rnn_hidden_states,
         )
 
+        # Start E2E block (function added)
+    def act_e2e(
+        self,
+        obs_transforms,
+        observations,
+        rnn_hidden_states,
+        prev_actions,
+        masks,
+        decoder,
+        act,
+        deterministic=False,
+    ):
+        features, rnn_hidden_states, _, _, _, _, _ = self.net( # Goes to forward function in resnet_policy.py
+            obs_transforms, observations, rnn_hidden_states, prev_actions,
+            masks, decoder, act
+        )
+        distribution = self.action_distribution(features)
+        value = self.critic(features)
+
+        if deterministic:
+            if self.action_distribution_type == "categorical":
+                action = distribution.mode()
+            elif self.action_distribution_type == "gaussian":
+                action = distribution.mean
+        else:
+            action = distribution.sample()
+
+        action_log_probs = distribution.log_probs(action)
+        # return value, action, action_log_probs, rnn_hidden_states
+        # The simple return statement does not create the appropriate object to
+        # later on return action_data.env_actions
+        return PolicyActionData(
+            values=value,
+            actions=action,
+            action_log_probs=action_log_probs,
+            rnn_hidden_states=rnn_hidden_states,
+        )
+    # End E2E block
+
+    @g_timer.avg_time("net_policy.get_value", level=1)
     def get_value(self, observations, rnn_hidden_states, prev_actions, masks):
         features, _, _ = self.net(
             observations, rnn_hidden_states, prev_actions, masks
         )
         return self.critic(features)
+
+    # Start E2E block (function added)
+    def get_value_e2e(self, obs_transforms, observations, rnn_hidden_states, prev_actions, masks, decoder, act):
+        features, _ , _ ,_, _, _, _ = self.net( # Goes to forward function in resnet_policy.py (same as act_e2e does)
+            obs_transforms, observations, rnn_hidden_states, prev_actions, masks, decoder, act
+        )
+        return self.critic(features)
+    # End E2E block
 
     def evaluate_actions(
         self,
@@ -294,6 +344,48 @@ class NetPolicy(nn.Module, Policy):
             rnn_hidden_states,
             aux_loss_res,
         )
+
+    # Start E2E block (complete function)
+    def evaluate_actions_e2e(  # this is the actual forward pass
+        self,
+        obs_transforms,
+        observations_orig,
+        rnn_hidden_states,
+        prev_actions,
+        masks,
+        action,
+        decoder,
+        rnn_build_seq_info: Dict[str, torch.Tensor]
+    ):
+        features, rnn_hidden_states, aux_loss_state, observations_gray, stimulations, phosphenes, reconstructions = self.net.forward( # Goes to forward function in resnet_policy.py
+            obs_transforms, observations_orig, rnn_hidden_states,
+            prev_actions, masks, decoder, act=False, rnn_build_seq_info=rnn_build_seq_info
+        )
+
+        distribution = self.action_distribution(features)
+        value = self.critic(features)
+
+        action_log_probs = distribution.log_probs(action)
+        distribution_entropy = distribution.entropy()
+
+        batch = dict(
+            observations=observations_orig,
+            rnn_hidden_states=rnn_hidden_states,
+            prev_actions=prev_actions,
+            masks=masks,
+            action=action,
+            decoder=decoder,
+            rnn_build_seq_info=rnn_build_seq_info,
+        )
+
+        aux_loss_res = {
+            k: v(aux_loss_state, batch)
+            for k, v in self.aux_loss_modules.items()
+        }
+
+        return value, action_log_probs, distribution_entropy, rnn_hidden_states, aux_loss_res, observations_gray, stimulations, phosphenes, reconstructions
+
+    # End E2E block
 
     def _get_policy_components(self) -> List[nn.Module]:
         return [self.net, self.critic, self.action_distribution]

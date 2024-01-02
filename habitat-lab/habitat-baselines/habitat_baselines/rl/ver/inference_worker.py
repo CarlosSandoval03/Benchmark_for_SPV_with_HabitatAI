@@ -35,7 +35,6 @@ from habitat_baselines.rl.ver.task_enums import (
     PreemptionDeciderTasks,
     ReportWorkerTasks,
 )
-from habitat_baselines.rl.ver.timing import Timing
 from habitat_baselines.rl.ver.ver_rollout_storage import VERRolloutStorage
 from habitat_baselines.rl.ver.worker_common import (
     InferenceWorkerSync,
@@ -45,6 +44,7 @@ from habitat_baselines.rl.ver.worker_common import (
     WorkerQueues,
 )
 from habitat_baselines.utils.common import batch_obs, inference_mode
+from habitat_baselines.utils.timing import Timing
 
 if TYPE_CHECKING:
     from omegaconf import DictConfig
@@ -121,7 +121,6 @@ class InferenceWorkerProcess(ProcessBase):
         assert self.max_reqs >= self.min_reqs
 
         self.min_wait_time = 0.01
-        self.obs_transforms = get_active_obs_transforms(self.config)
         self._variable_experience = (
             self.config.habitat_baselines.rl.ver.variable_experience
         )

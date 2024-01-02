@@ -18,7 +18,10 @@ from habitat_baselines.rl.models.rnn_state_encoder import (
     build_rnn_build_seq_info,
 )
 from habitat_baselines.utils.common import get_action_space_info
+from habitat_baselines.utils.timing import g_timer
 
+import matplotlib.pyplot as plt
+import pdb
 
 @baseline_registry.register_storage
 class RolloutStorage(Storage):
@@ -26,6 +29,7 @@ class RolloutStorage(Storage):
 
     def __init__(
         self,
+        obs_transforms, # Add E2E
         numsteps,
         num_envs,
         observation_space,
@@ -37,6 +41,24 @@ class RolloutStorage(Storage):
         action_shape, discrete_actions = get_action_space_info(action_space)
 
         self.buffers = TensorDict()
+
+        # Start E2E block
+        if any('Encoder' in str(transform) for transform in obs_transforms):
+            self.buffers["observations_orig"] = TensorDict()
+
+            for sensor in observation_space.spaces:
+                self.buffers["observations_orig"][sensor] = torch.from_numpy(
+                np.zeros(
+                    (
+                        numsteps + 1,
+                        num_envs,
+                        *observation_space.spaces[sensor].shape,
+                    ),
+                    dtype=observation_space.spaces[sensor].dtype,
+                )
+            )
+        # End E2E block
+
         self.buffers["observations"] = TensorDict()
 
         for sensor in observation_space.spaces:
@@ -47,7 +69,9 @@ class RolloutStorage(Storage):
                         num_envs,
                         *observation_space.spaces[sensor].shape,
                     ),
-                    dtype=observation_space.spaces[sensor].dtype,
+                    # dtype=observation_space.spaces[sensor].dtype,
+                    dtype="float32" if any('Encoder' in str(transform) for transform in obs_transforms) else
+                    observation_space.spaces[sensor].dtype,
                 )
             )
 
@@ -160,6 +184,61 @@ class RolloutStorage(Storage):
                 strict=False,
             )
 
+    # Start E2E block (add function)
+    def insert_e2e(
+        self,
+        next_observations_orig=None,  # mainadd
+        next_observations=None,
+        next_recurrent_hidden_states=None,
+        actions=None,
+        action_log_probs=None,
+        value_preds=None,
+        rewards=None,
+        next_masks=None,
+        buffer_index: int = 0,
+        **kwargs,
+    ):
+        if not self.is_double_buffered:
+            assert buffer_index == 0
+
+        next_step = dict(
+            observations_orig=next_observations_orig,  # mainadd
+            observations=next_observations,
+            recurrent_hidden_states=next_recurrent_hidden_states,
+            prev_actions=actions,
+            masks=next_masks,
+        )
+
+        current_step = dict(
+            actions=actions,
+            action_log_probs=action_log_probs,
+            value_preds=value_preds,
+            rewards=rewards,
+        )
+
+        next_step = {k: v for k, v in next_step.items() if v is not None}
+        current_step = {k: v for k, v in current_step.items() if v is not None}
+
+        env_slice = slice(
+            int(buffer_index * self._num_envs / self._nbuffers),
+            int((buffer_index + 1) * self._num_envs / self._nbuffers),
+        )
+
+        if len(next_step) > 0:
+            self.buffers.set(
+                (self.current_rollout_step_idxs[buffer_index] + 1, env_slice),
+                next_step,
+                strict=False,
+            )
+
+        if len(current_step) > 0:
+            self.buffers.set(
+                (self.current_rollout_step_idxs[buffer_index], env_slice),
+                current_step,
+                strict=False,
+            )
+    # End E2E block
+
     def advance_rollout(self, buffer_index: int = 0):
         self.current_rollout_step_idxs[buffer_index] += 1
 
@@ -170,6 +249,7 @@ class RolloutStorage(Storage):
             0 for _ in self.current_rollout_step_idxs
         ]
 
+    @g_timer.avg_time("rollout_storage.compute_returns", level=1)
     def compute_returns(self, next_value, use_gae, gamma, tau):
         if use_gae:
             assert isinstance(self.buffers["value_preds"], torch.Tensor)
@@ -202,7 +282,7 @@ class RolloutStorage(Storage):
                     + self.buffers["rewards"][step]
                 )
 
-    def recurrent_generator(
+    def data_generator(
         self,
         advantages: Optional[torch.Tensor],
         num_mini_batch: int,

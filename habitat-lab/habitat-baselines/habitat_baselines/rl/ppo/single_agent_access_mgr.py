@@ -17,6 +17,9 @@ from habitat_baselines.rl.ddppo.policy import (  # noqa: F401.
     PointNavResNetNet,
     PointNavResNetPolicy,
 )
+from habitat_baselines.common.obs_transformers import (
+    get_active_obs_transforms
+)
 from habitat_baselines.rl.hrl.hierarchical_policy import (  # noqa: F401.
     HierarchicalPolicy,
 )
@@ -24,6 +27,13 @@ from habitat_baselines.rl.ppo.agent_access_mgr import AgentAccessMgr
 from habitat_baselines.rl.ppo.policy import NetPolicy, Policy
 from habitat_baselines.rl.ppo.ppo import PPO
 from habitat_baselines.rl.ppo.updater import Updater
+
+# Added E2E line
+import sys
+sys.path.append('/scratch/big/home/carsan/Internship/PyCharm_projects/habitat_2.3/habitat-phosphenes')
+from phosphenes import E2E_Decoder
+from pathlib import Path
+import phosphenes
 
 if TYPE_CHECKING:
     from omegaconf import DictConfig
@@ -41,6 +51,7 @@ class SingleAgentAccessMgr(AgentAccessMgr):
         num_envs: int,
         percent_done_fn: Callable[[], float],
         lr_schedule_fn: Optional[Callable[[float], float]] = None,
+        **kwargs
     ):
         """
         :param percent_done_fn: Function that will return the percent of the
@@ -52,6 +63,8 @@ class SingleAgentAccessMgr(AgentAccessMgr):
         """
 
         self._env_spec = env_spec
+        self.obs_transforms = kwargs.get('obs_transforms', None)
+        self.decoder = kwargs.get('decoder', None)
         self._config = config
         self._num_envs = num_envs
         self._device = device
@@ -117,7 +130,7 @@ class SingleAgentAccessMgr(AgentAccessMgr):
                 self._config.habitat_baselines.updater_name
             )
 
-        updater = updater_cls.from_config(actor_critic, self._ppo_cfg)
+        updater = updater_cls.from_config(actor_critic, self._ppo_cfg, self.obs_transforms, self.decoder)
         logger.info(
             "agent number of parameters: {}".format(
                 sum(param.numel() for param in updater.parameters())
@@ -143,6 +156,7 @@ class SingleAgentAccessMgr(AgentAccessMgr):
             self._env_spec.action_space,
             orig_action_space=self._env_spec.orig_action_space,
         )
+
         if (
             self._config.habitat_baselines.rl.ddppo.pretrained_encoder
             or self._config.habitat_baselines.rl.ddppo.pretrained
@@ -152,13 +166,38 @@ class SingleAgentAccessMgr(AgentAccessMgr):
                 map_location="cpu",
             )
 
+            # Start E2E block
+            if any('Encoder' in str(transform) for transform in self.obs_transforms):
+                pretrained_agent_with_decoder = self.load_checkpoint(
+                    self.checkpoint_path_phosphene, map_location="cpu")
+                # torch.load(self.checkpoint_path) #FIX
+                print('added decoder checkpoint')
+            # End E2E block
+
         if self._config.habitat_baselines.rl.ddppo.pretrained:
+            # Start E2E block
+            print('pretrainedstatedict')
+            for k, v in pretrained_state["state_dict"].items():
+                print(k, v.shape)
+            print('allnet')
+            print(self.actor_critic.net)
+            # End E2E block
+
             actor_critic.load_state_dict(
                 {  # type: ignore
                     k[len("actor_critic.") :]: v
                     for k, v in pretrained_state["state_dict"].items()
                 }
             )
+
+            # Start E2E block
+            if any('Encoder' in str(transform) for transform in self.obs_transforms):
+                # self.actor_critic.net.decoder.load_state_dict(pretrained_agent_with_decoder["state_dict_decoder"])
+                self.decoder.load_state_dict(
+                    pretrained_agent_with_decoder["state_dict_decoder"])
+                print('loaded decoder checkpoint')
+            # End E2E block
+
         elif self._config.habitat_baselines.rl.ddppo.pretrained_encoder:
             prefix = "actor_critic.net.visual_encoder."
             actor_critic.net.visual_encoder.load_state_dict(
@@ -280,9 +319,15 @@ def default_create_rollouts(
         env_spec.observation_space, actor_critic, config
     )
     ppo_cfg = config.habitat_baselines.rl.ppo
+
+    # Start E2E block
+    obs_transforms = get_active_obs_transforms(config)
+    # End E2E block
+
     rollouts = baseline_registry.get_storage(
         config.habitat_baselines.rollout_storage_name
-    )(
+    )( # Add here obs_transforms, it is what it is missing according to the init function of RolloutStorage
+        obs_transforms, # Add E2E
         ppo_cfg.num_steps,
         num_envs,
         obs_space,

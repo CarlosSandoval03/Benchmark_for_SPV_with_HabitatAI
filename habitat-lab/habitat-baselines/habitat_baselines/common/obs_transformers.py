@@ -26,6 +26,12 @@ import numbers
 from enum import Enum
 from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Tuple, Union
 
+# Start E2E block
+import matplotlib
+from matplotlib import pyplot as plt
+from PIL import Image
+# End E2E block
+
 import numpy as np
 import torch
 from gym import spaces
@@ -1233,6 +1239,43 @@ def apply_obs_transforms_obs_space(
         obs_space = obs_transform.transform_observation_space(obs_space)
     return obs_space
 
+
+def apply_obs_transforms_batch_video(
+    batch: Dict[str, torch.Tensor],
+    obs_transforms: Iterable[ObservationTransformer],
+    decoder
+) -> Tuple[Dict[str, torch.Tensor], List[Dict[str, torch.Tensor]]]:
+    batch_all=[]
+    # Save original image
+    base_path = '/home/carsan/Data/habitatai/images/img_'
+    plt.imsave(base_path + 'input' + '.png', batch['rgb'][0, :, :, :].detach().cpu().numpy())
+
+    for obs_transform in obs_transforms:
+        batch = obs_transform(batch)
+        batch_all.append(copy.deepcopy(batch))
+        # Added
+        # """
+        if batch['rgb'].shape[-1]==1: # Gray and Encoder
+            new_image = batch['rgb'][0, :, :, :].detach().cpu().numpy()
+            plt.imsave(base_path+str(obs_transform)[0:6]+'.png', np.squeeze(new_image), cmap=plt.cm.gray)
+        else: # Simulator
+            new_image = batch['rgb'][0,:,:,:].detach().cpu().numpy()
+            min_val = np.min(new_image)
+            max_val = np.max(new_image)
+            if (max_val - min_val) != 0:
+                new_image = (new_image - min_val) / (max_val - min_val)
+            else:
+                new_image = new_image / np.max(new_image)
+            plt.imsave(base_path+str(obs_transform)[0:7]+'.png', new_image, cmap=plt.cm.gray)
+        # """
+
+    # """
+    if isinstance(decoder, ObservationTransformer):
+        reconstruction = decoder(batch.copy())
+        new_image_recon = reconstruction['rgb'][0, :, :, 0].detach().cpu().numpy()
+        plt.imsave(base_path + str(decoder)[0:7] + '.png', new_image_recon, cmap=plt.cm.gray)
+    # """
+    return batch, batch_all
 
 @baseline_registry.register_obs_transformer()
 class AddVirtualKeys(ObservationTransformer):

@@ -111,6 +111,163 @@ cs.store(
 )
 
 
+# MY CODE (ALMOST sure it is not necessary)
+@dataclass
+class EdgeFilterConfig(ObsTransformConfig):
+    type: str = "EdgeFilter"
+    sigma: int = 3
+    threshold_low: int = 20
+    threshold_high: int = 40
+    channels_last: bool = True #Comment??
+    trans_keys: Tuple[str, ...] = ( #Comment??
+        "rgb",
+        "depth",
+        "semantic",
+    )
+
+
+cs.store(
+    package="habitat_baselines.rl.policy.obs_transforms.edge_filter",
+    group="habitat_baselines/rl/policy/obs_transforms",
+    name="edge_filter_base",
+    node=EdgeFilterConfig,
+)
+
+@dataclass
+class PhospheneVisionConfig(ObsTransformConfig):
+    type: str = "Phosphenes"
+    size: Tuple[int, ...] = (256, 256)
+    resolution: int = 32
+    sigma: int = 2
+    channels_last: bool = True #Comment??
+    trans_keys: Tuple[str, ...] = ( #Comment??
+        "rgb",
+        "depth",
+        "semantic",
+    )
+
+
+cs.store(
+    package="habitat_baselines.rl.policy.obs_transforms.phosphenes_vision",
+    group="habitat_baselines/rl/policy/obs_transforms",
+    name="phosphenes_vision_base",
+    node=PhospheneVisionConfig,
+)
+
+@dataclass
+class PhospheneVisionRealisticConfig(ObsTransformConfig):
+    type: str = "PhosphenesRealistic"
+    resolution: int = 32
+    intensity_decay: float = 0.4
+    num_electrodes: int = 256
+    channels_last: bool = True #Comment??
+    trans_keys: Tuple[str, ...] = ( #Comment??
+        "rgb",
+        "depth",
+        "semantic",
+    )
+
+
+cs.store(
+    package="habitat_baselines.rl.policy.obs_transforms.phosphenes_vision_realistic",
+    group="habitat_baselines/rl/policy/obs_transforms",
+    name="phosphenes_vision_realistic_base",
+    node=PhospheneVisionRealisticConfig,
+)
+
+@dataclass
+class GrayScaleConfig(ObsTransformConfig):
+    type: str = "GrayScale"
+    channels_last: bool = True #Comment??
+    trans_keys: Tuple[str, ...] = ( #Comment??
+        "rgb",
+        "depth",
+        "semantic",
+    )
+
+
+cs.store(
+    package="habitat_baselines.rl.policy.obs_transforms.gray_scale",
+    group="habitat_baselines/rl/policy/obs_transforms",
+    name="gray_scale_base",
+    node=GrayScaleConfig,
+)
+
+
+@dataclass
+class BlackScreenConfig(ObsTransformConfig):
+    type: str = "BlackScreen"
+    channels_last: bool = True #Comment??
+    trans_keys: Tuple[str, ...] = ( #Comment??
+        "rgb",
+        "depth",
+        "semantic",
+    )
+
+
+cs.store(
+    package="habitat_baselines.rl.policy.obs_transforms.black_screen",
+    group="habitat_baselines/rl/policy/obs_transforms",
+    name="black_screen_base",
+    node=BlackScreenConfig,
+)
+
+@dataclass
+class EncoderConfig(ObsTransformConfig):
+    type: str = "Encoder"
+    channels_last: bool = True #Comment??
+    trans_keys: Tuple[str, ...] = ( #Comment??
+        "rgb",
+        "depth",
+        "semantic",
+    )
+
+
+cs.store(
+    package="habitat_baselines.rl.policy.obs_transforms.Encoder",
+    group="habitat_baselines/rl/policy/obs_transforms",
+    name="Encoder_base",
+    node=EncoderConfig,
+)
+
+@dataclass
+class E2E_DecoderConfig(ObsTransformConfig):
+    type: str = "E2E_Decoder"
+    channels_last: bool = True #Comment??
+    trans_keys: Tuple[str, ...] = ( #Comment??
+        "rgb",
+        "depth",
+        "semantic",
+    )
+
+
+cs.store(
+    package="habitat_baselines.rl.policy.obs_transforms.E2E_Decoder",
+    group="habitat_baselines/rl/policy/obs_transforms",
+    name="E2E_Decoder_base",
+    node=E2E_DecoderConfig,
+)
+
+@dataclass
+class E2E_PhospheneSimulatorConfig(ObsTransformConfig):
+    type: str = "E2E_PhospheneSimulator"
+    channels_last: bool = True #Comment??
+    trans_keys: Tuple[str, ...] = ( #Comment??
+        "rgb",
+        "depth",
+        "semantic",
+    )
+
+
+cs.store(
+    package="habitat_baselines.rl.policy.obs_transforms.E2E_PhospheneSimulator",
+    group="habitat_baselines/rl/policy/obs_transforms",
+    name="E2E_PhospheneSimulator_base",
+    node=E2E_PhospheneSimulatorConfig,
+)
+# END OF MY CODE
+
+
 @dataclass
 class ResizeShortestEdgeConfig(ObsTransformConfig):
     type: str = "ResizeShortestEdge"
@@ -346,7 +503,7 @@ class DDPPOConfig(HabitatBaselinesBaseConfig):
     num_recurrent_layers: int = 1
     backbone: str = "resnet18"
     # Visual encoder backbone
-    pretrained_weights: str = "data/ddppo-models/gibson-2plus-resnet50.pth"
+    pretrained_weights: str = "data/pretrained_models/gibson-rgbd-best.pth"
     # Initialize with pretrained weights
     pretrained: bool = False
     # Loads just the visual encoder backbone weights
