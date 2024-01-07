@@ -17,6 +17,7 @@ def parse_tensorboard(path, scalars):
 
 if __name__ == "__main__":
     input_file = "/scratch/big/home/carsan/Data/phosphenes/habitat/tb/eval/eval_NPT_GPS_Original_black/events.out.tfevents.1690838930.mars.2235472.0"
-    data = parse_tensorboard(input_file, ["eval_metrics/distance_to_goal","eval_metrics/spl","eval_metrics/success"])
+    metrics_of_interest = ["eval_metrics/distance_to_goal", "eval_metrics/spl", "eval_metrics/success"]
+    data = parse_tensorboard(input_file, metrics_of_interest)
 
     print("END")

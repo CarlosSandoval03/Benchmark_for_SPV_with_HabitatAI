@@ -534,7 +534,7 @@ class VERTrainer(PPOTrainer):
                         self._iw_sync.should_start_next.set()
                         self.preemption_decider.start_rollout()
 
-            losses = self._update_agent()
+            losses = self._update_agent(self.num_updates_done)
 
             self.preemption_decider.learner_time(self._learning_time)
 

@@ -18,6 +18,7 @@ import os
 import pathlib
 import importlib.resources
 import yaml
+import datetime
 
 import math
 import noise
@@ -84,30 +85,46 @@ class GrayScale(ObservationTransformer):
         super().__init__()
         self.transformed_sensor = 'rgb'
 
+        self.counter_image = 0
+
+        self.backgroundMasking = True
+        self.distance = 0.25 # Real distance in meters is about this value times 10
+        self.overrideDepth = True
+
         # self.resize_needed = resize_needed
 
     def forward(self, observations: Dict[str, torch.Tensor]
                 ) -> Dict[str, torch.Tensor]:
         if self.transformed_sensor in observations:
-            observations[self.transformed_sensor] = self._transform_obs(
-                observations[self.transformed_sensor])
+            if self.backgroundMasking == True:
+                maskingImages = self.maskImagesDepth(observations["rgb"], observations["depth"], self.distance)
+                observations[self.transformed_sensor] = self._transform_obs(maskingImages)
+                if self.overrideDepth:
+                    observations["depth"] = self.override_with_ones_mask(observations["depth"])
+            else:
+                observations[self.transformed_sensor] = self._transform_obs(
+                    observations[self.transformed_sensor])
         return observations
 
-    @staticmethod
-    def _transform_obs(observation):
+    def _transform_obs(self, observation):
         device = observation.device
 
         observation = observation.cpu().numpy()
 
-        # plt.imsave(savepath + 'obs_input.png', observation[0, :, :, :], cmap=plt.cm.gray)
+        # Save image input
+        # timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        # save_path = f"{savepath}obs_input_{timestamp}.png"
+        # plt.imsave(save_path, observation[0, :, :, :], cmap=plt.cm.gray)
+        # plt.imsave(savepath + name_for_image, observation[0, :, :, :], cmap=plt.cm.gray)
 
         frames = []
-        for frame in observation:
+        for idx, frame in enumerate(observation):
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
             # Start Added E2E block (is this needed? check rest pipeline)
             # Added if resized needed for e2e pipeline
             frame = cv2.resize(frame, (128,128), interpolation=cv2.INTER_AREA)
+
             # End Added E2E block
 
             frames.append(frame)
@@ -136,6 +153,32 @@ class GrayScale(ObservationTransformer):
         observation_space[key] = overwrite_gym_box_shape(
             observation_space[key], new_shape)
         return observation_space
+
+    def maskImagesDepth(self, images, depth_maps, distance):
+        """
+        Mask images based on depth maps.
+
+        :param images: Tensor of shape (x, 256, 256, 1) representing images.
+        :param depth_maps: Tensor of shape (x, 256, 256, 1) representing depth maps.
+        :param distance: Threshold distance for masking.
+        :return: Masked images tensor.
+        """
+        masked_images = torch.clone(images)
+        for i in range(images.shape[0]):
+            mask = depth_maps[i] <= distance  # Create a mask where depth is less than or equal to distance
+            masked_images[i] = images[i] * mask  # Apply the mask to the image
+
+        return masked_images
+
+    def override_with_ones_mask(self, depth_tensor):
+        """
+        Override a depth tensor with a mask of ones.
+
+        :param depth_tensor: A tensor representing the depth maps.
+        :return: A tensor of the same shape as depth_tensor, filled with ones.
+        """
+        ones_mask = torch.ones_like(depth_tensor)
+        return ones_mask
 
 
 @baseline_registry.register_obs_transformer()
@@ -815,7 +858,7 @@ class CustomLoss(object):
 
             # Compute the average SSIM
             average_ssim = sum(ssim_values) / len(ssim_values)
-            loss_recon = 1 - average_ssim
+            loss_recon = average_ssim # 1 - average_ssim
             loss_recon = torch.as_tensor(loss_recon, device=device)
             loss_recon_return = loss_recon
         elif self.recon_loss_type == "hist": # Histogram comparison
@@ -824,7 +867,7 @@ class CustomLoss(object):
                 sim = self.recon_loss(img1.cpu().detach().numpy(), img2.cpu().detach().numpy())
                 histogram_similarities.append(sim)
             # Compute the average similarity
-            loss_recon = sum(histogram_similarities) / len(histogram_similarities)
+            loss_recon = abs(sum(histogram_similarities) / len(histogram_similarities))
             loss_recon = torch.as_tensor(loss_recon, device=device)
             loss_recon_return = loss_recon
         else: # MSE for now just to cover all cases

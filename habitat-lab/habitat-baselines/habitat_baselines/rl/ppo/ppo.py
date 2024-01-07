@@ -37,6 +37,10 @@ from habitat_baselines.common.obs_transformers import ObservationTransformer
 from phosphenes import CustomLoss
 import phosphenes
 from pathlib import Path
+import torch
+import matplotlib.pyplot as plt
+import cv2
+import os
 
 
 import pdb
@@ -46,12 +50,49 @@ import gc
 EPS_PPO = 1e-5
 
 # Start E2E block
+mse_loss_deb = nn.MSELoss() # For loss function debugging
 loss_function = CustomLoss(recon_loss_type='mse',
                                             recon_loss_param=0,
                                             stimu_loss_type=None,
                                             kappa=0)
-# End E2E block
+# Function for debugging reconstruction evaluation
+def plot_images(image_tensor, phosphenes_tensor, reconstruction_tensor, figure_title, subtitles, save_name):
+    # Convert tensors to numpy and handle channels
+    image_np = image_tensor[5].cpu().detach().numpy().squeeze()
+    phosphenes_np = phosphenes_tensor[5].cpu().detach().numpy().squeeze()
+    reconstruction_np = reconstruction_tensor[5].cpu().detach().numpy().squeeze()
 
+    # Resize phosphenes image to (128, 128)
+    phosphenes_np = cv2.resize(phosphenes_np, (128, 128))
+
+    # Create a figure
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+    # Adjust layout to make space for the general title
+    plt.subplots_adjust(top=0.85)
+
+    # Plotting each image with its subtitle
+    images = [image_np, phosphenes_np, reconstruction_np]
+    for ax, img, subtitle in zip(axes, images, subtitles):
+        ax.imshow(img, cmap='gray' if img.ndim == 2 else None)
+        ax.set_title(subtitle)
+        ax.axis('off')
+        ax.set_xticks([])  # Remove x-axis ticks
+        ax.set_yticks([])  # Remove y-axis ticks
+
+    # Check if the directory exists, and if not, create it
+    save_dir = '/scratch/big/home/carsan/Internship/PyCharm_projects/habitat_2.3/habitat-phosphenes/reconstructionGPSRGBDepth_weightPPO=0.9_decoderWithRelu_DepthSuppressionDistance=0.25_depthOverride=1'
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    # Save the figure
+    save_path = os.path.join(save_dir, f'{save_name}.png')
+    # Set the general title for the figure
+    fig.suptitle(figure_title, fontsize=16)
+    plt.savefig(save_path, bbox_inches='tight')
+    plt.close()
+
+# End E2E block
 @baseline_registry.register_updater
 class PPO(nn.Module, Updater):
     entropy_coef: Union[float, LagrangeInequalityCoefficient]
@@ -375,7 +416,7 @@ class PPO(nn.Module, Updater):
         self._set_grads_to_none()
 
         # Added for E2E
-        weight_loss_ppo = 0.6
+        weight_loss_ppo = 0.9
 
         (
             values,
@@ -464,6 +505,21 @@ class PPO(nn.Module, Updater):
             stimulation=update_stimulations,
             phosphenes=update_phosphenes,
             reconstruction=update_reconstructions)
+
+        if self.num_updates == 0 or self.num_updates % 500 == 0:
+            figure_title = f'Reconstruction after {self.num_updates} updates'
+            file_name = f'MSE_{self.num_updates}updates'
+            plot_images(observations_gray, update_phosphenes,
+                        update_reconstructions["rgb"],
+                        figure_title,
+                        ['Gray Scaled Image', 'Phosphenes', 'Reconstruction'],
+                        file_name)
+
+            # if recon_loss < 0.015:
+            # if recon_loss < 0.015 and mse_loss_deb(update_reconstructions["rgb"], observations_gray) < 0.015:
+            #     print(
+            #         "Reconstruction loss is below the threshold. Exiting the program.")
+            #     sys.exit()
 
         stim_loss = stim_loss.to(torch.float32)  # usually super high, around 16000
         recon_loss = recon_loss.to(torch.float32)
@@ -568,10 +624,12 @@ class PPO(nn.Module, Updater):
             }
 
     # Start E2E block
-    def update_e2e(self, rollouts: RolloutStorage,
+    def update_e2e(self, rollouts: RolloutStorage, num_updates
                    ) -> Dict[str, float]:
 
         advantages = self.get_advantages(rollouts)
+
+        self.num_updates = num_updates
 
         learner_metrics: Dict[str, List[Any]] = collections.defaultdict(list)
 

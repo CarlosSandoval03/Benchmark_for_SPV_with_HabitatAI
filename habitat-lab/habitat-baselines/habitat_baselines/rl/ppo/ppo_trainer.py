@@ -628,8 +628,9 @@ class PPOTrainer(BaseRLTrainer):
         return self._collect_environment_result()
 
     @profiling_wrapper.RangeContext("_update_agent")
-    def _update_agent(self):
+    def _update_agent(self, num_updates):
         t_update_model = time.time()
+        self.num_updates = num_updates
 
         with torch.no_grad():
             step_batch = self._agent.rollouts.get_last_step()
@@ -677,7 +678,8 @@ class PPOTrainer(BaseRLTrainer):
         # Start E2E block
         if any('Encoder' in str(transform) for transform in self.obs_transforms):
             losses = self._agent.updater.update_e2e(
-                self._agent.rollouts
+                self._agent.rollouts,
+                num_updates
             )
         else:
             losses = self._agent.updater.update(self._agent.rollouts)
@@ -944,7 +946,7 @@ class PPOTrainer(BaseRLTrainer):
                 if self._is_distributed:
                     self.num_rollouts_done_store.add("num_done", 1)
 
-                losses = self._update_agent() # From here it goes to the update_e2e functions in ppo.py
+                losses = self._update_agent(self.num_updates_done) # From here it goes to the update_e2e functions in ppo.py
 
                 self.num_updates_done += 1
                 losses = self._coalesce_post_step(
@@ -1132,7 +1134,7 @@ class PPOTrainer(BaseRLTrainer):
         # Start E2E block
         # batch = apply_obs_transforms_batch(batch, self.obs_transforms)  # type: ignore
         with torch.no_grad():
-            batch, _ = apply_obs_transforms_batch_video(batch, self.obs_transforms, self.decoder)
+            batch, _ = apply_obs_transforms_batch_video(batch, self.obs_transforms, self.decoder, self.envs.number_of_episodes[0])
         # End E2E block
 
         current_episode_reward = torch.zeros(
@@ -1297,7 +1299,7 @@ class PPOTrainer(BaseRLTrainer):
 
             # Start E2E block
             with torch.no_grad():
-                batch, _ = apply_obs_transforms_batch_video(batch, self.obs_transforms, self.decoder)  # type: ignore
+                batch, _ = apply_obs_transforms_batch_video(batch, self.obs_transforms, self.decoder, self.envs.number_of_episodes[0])  # type: ignore
             # End E2E block
 
             not_done_masks = torch.tensor(

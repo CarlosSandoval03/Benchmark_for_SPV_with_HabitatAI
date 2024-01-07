@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Tuple, Union
 import matplotlib
 from matplotlib import pyplot as plt
 from PIL import Image
+import datetime
 # End E2E block
 
 import numpy as np
@@ -1243,12 +1244,16 @@ def apply_obs_transforms_obs_space(
 def apply_obs_transforms_batch_video(
     batch: Dict[str, torch.Tensor],
     obs_transforms: Iterable[ObservationTransformer],
-    decoder
+    decoder,
+    num_episode
 ) -> Tuple[Dict[str, torch.Tensor], List[Dict[str, torch.Tensor]]]:
     batch_all=[]
     # Save original image
-    base_path = '/home/carsan/Data/habitatai/images/img_'
-    plt.imsave(base_path + 'input' + '.png', batch['rgb'][0, :, :, :].detach().cpu().numpy())
+    base_path = '/home/carsan/Data/habitatai/EvaluationImages/img_'
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_path = f"{base_path}input_{timestamp}_Episode_{num_episode}.png"
+    # save_path = f"{base_path}input_Episode_{num_episode}.png"
+    plt.imsave(save_path, batch['rgb'][0, :, :, :].detach().cpu().numpy())
 
     for obs_transform in obs_transforms:
         batch = obs_transform(batch)
@@ -1257,7 +1262,10 @@ def apply_obs_transforms_batch_video(
         # """
         if batch['rgb'].shape[-1]==1: # Gray and Encoder
             new_image = batch['rgb'][0, :, :, :].detach().cpu().numpy()
-            plt.imsave(base_path+str(obs_transform)[0:6]+'.png', np.squeeze(new_image), cmap=plt.cm.gray)
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            save_path = f"{base_path}{str(obs_transform)[0:7]}{timestamp}_Episode_{num_episode}.png"
+            # save_path = f"{base_path}{str(obs_transform)[0:7]}_Episode_{num_episode}.png"
+            plt.imsave(save_path, np.squeeze(new_image), cmap=plt.cm.gray)
         else: # Simulator
             new_image = batch['rgb'][0,:,:,:].detach().cpu().numpy()
             min_val = np.min(new_image)
@@ -1266,14 +1274,21 @@ def apply_obs_transforms_batch_video(
                 new_image = (new_image - min_val) / (max_val - min_val)
             else:
                 new_image = new_image / np.max(new_image)
-            plt.imsave(base_path+str(obs_transform)[0:7]+'.png', new_image, cmap=plt.cm.gray)
+
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            save_path = f"{base_path}{str(obs_transform)[0:7]}{timestamp}_Episode_{num_episode}.png"
+            # save_path = f"{base_path}{str(obs_transform)[0:7]}_Episode_{num_episode}.png"
+            plt.imsave(save_path, new_image, cmap=plt.cm.gray)
         # """
 
     # """
     if isinstance(decoder, ObservationTransformer):
         reconstruction = decoder(batch.copy())
         new_image_recon = reconstruction['rgb'][0, :, :, 0].detach().cpu().numpy()
-        plt.imsave(base_path + str(decoder)[0:7] + '.png', new_image_recon, cmap=plt.cm.gray)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        save_path = f"{base_path}{str(decoder)[0:7]}{timestamp}_Episode_{num_episode}.png"
+        # save_path = f"{base_path}{str(decoder)[0:7]}_Episode_{num_episode}.png"
+        plt.imsave(save_path, new_image_recon, cmap=plt.cm.gray)
     # """
     return batch, batch_all
 
