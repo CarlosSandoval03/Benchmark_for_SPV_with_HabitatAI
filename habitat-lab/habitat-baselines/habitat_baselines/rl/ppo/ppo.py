@@ -81,7 +81,7 @@ def plot_images(image_tensor, phosphenes_tensor, reconstruction_tensor, figure_t
         ax.set_yticks([])  # Remove y-axis ticks
 
     # Check if the directory exists, and if not, create it
-    save_dir = '/scratch/big/home/carsan/Internship/PyCharm_projects/habitat_2.3/habitat-phosphenes/reconstructionGPSRGBDepth_weightPPO=0.9_decoderWithRelu_DepthSuppressionDistance=0.25_depthOverride=1'
+    save_dir = '/scratch/big/home/carsan/Internship/PyCharm_projects/habitat_2.3/habitat-phosphenes/reconstructionRGBDepth_weightPPO=0.9_decoderWithRelu_DepthSuppressionDistance=0.25_depthOverride=1'
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
@@ -506,14 +506,14 @@ class PPO(nn.Module, Updater):
             phosphenes=update_phosphenes,
             reconstruction=update_reconstructions)
 
-        if self.num_updates == 0 or self.num_updates % 500 == 0:
-            figure_title = f'Reconstruction after {self.num_updates} updates'
-            file_name = f'MSE_{self.num_updates}updates'
-            plot_images(observations_gray, update_phosphenes,
-                        update_reconstructions["rgb"],
-                        figure_title,
-                        ['Gray Scaled Image', 'Phosphenes', 'Reconstruction'],
-                        file_name)
+        # if self.num_updates == 0 or self.num_updates % 500 == 0:
+        #     figure_title = f'Reconstruction after {self.num_updates} updates'
+        #     file_name = f'MSE_{self.num_updates}updates'
+        #     plot_images(observations_gray, update_phosphenes,
+        #                 update_reconstructions["rgb"],
+        #                 figure_title,
+        #                 ['Gray Scaled Image', 'Phosphenes', 'Reconstruction'],
+        #                 file_name)
 
             # if recon_loss < 0.015:
             # if recon_loss < 0.015 and mse_loss_deb(update_reconstructions["rgb"], observations_gray) < 0.015:

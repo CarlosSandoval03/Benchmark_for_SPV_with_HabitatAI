@@ -1247,49 +1247,50 @@ def apply_obs_transforms_batch_video(
     decoder,
     num_episode
 ) -> Tuple[Dict[str, torch.Tensor], List[Dict[str, torch.Tensor]]]:
-    batch_all=[]
-    # Save original image
-    base_path = '/home/carsan/Data/habitatai/EvaluationImages/img_'
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_path = f"{base_path}input_{timestamp}_Episode_{num_episode}.png"
-    # save_path = f"{base_path}input_Episode_{num_episode}.png"
-    plt.imsave(save_path, batch['rgb'][0, :, :, :].detach().cpu().numpy())
+    batch_all = []
+    images = []
+    base_path = '/home/carsan/Data/habitatai/eval_GPSRGB_10Msteps_best_Figures/img_'
 
+    # Process each transformation and collect images
     for obs_transform in obs_transforms:
         batch = obs_transform(batch)
         batch_all.append(copy.deepcopy(batch))
-        # Added
-        # """
-        if batch['rgb'].shape[-1]==1: # Gray and Encoder
+
+        if batch['rgb'].shape[-1] == 1:  # Gray and Encoder
+            new_image = batch['rgb'][0, :, :, :].detach().cpu().numpy().squeeze()
+            images.append(new_image)
+        else:  # Simulator
             new_image = batch['rgb'][0, :, :, :].detach().cpu().numpy()
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            save_path = f"{base_path}{str(obs_transform)[0:7]}{timestamp}_Episode_{num_episode}.png"
-            # save_path = f"{base_path}{str(obs_transform)[0:7]}_Episode_{num_episode}.png"
-            plt.imsave(save_path, np.squeeze(new_image), cmap=plt.cm.gray)
-        else: # Simulator
-            new_image = batch['rgb'][0,:,:,:].detach().cpu().numpy()
-            min_val = np.min(new_image)
-            max_val = np.max(new_image)
-            if (max_val - min_val) != 0:
-                new_image = (new_image - min_val) / (max_val - min_val)
-            else:
-                new_image = new_image / np.max(new_image)
+            min_val, max_val = np.min(new_image), np.max(new_image)
+            new_image = (new_image - min_val) / (
+                    max_val - min_val) if max_val - min_val != 0 else new_image / max_val
+            images.append(new_image)
 
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            save_path = f"{base_path}{str(obs_transform)[0:7]}{timestamp}_Episode_{num_episode}.png"
-            # save_path = f"{base_path}{str(obs_transform)[0:7]}_Episode_{num_episode}.png"
-            plt.imsave(save_path, new_image, cmap=plt.cm.gray)
-        # """
-
-    # """
+    # Process and add the decoder image
     if isinstance(decoder, ObservationTransformer):
         reconstruction = decoder(batch.copy())
         new_image_recon = reconstruction['rgb'][0, :, :, 0].detach().cpu().numpy()
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        save_path = f"{base_path}{str(decoder)[0:7]}{timestamp}_Episode_{num_episode}.png"
-        # save_path = f"{base_path}{str(decoder)[0:7]}_Episode_{num_episode}.png"
-        plt.imsave(save_path, new_image_recon, cmap=plt.cm.gray)
-    # """
+        images.append(new_image_recon)
+
+    # Create a figure with subplots
+    fig, axes = plt.subplots(1, 4, figsize=(12, 4))
+    titles = ["Gray Scale", "Encoder", "Phosphenes", "Decoder"]
+    for ax, img, title in zip(axes, images, titles):
+        if img.shape[-1] == 1:  # Grayscale image with channel dimension
+            img = np.squeeze(img)  # Remove the channel dimension
+            ax.imshow(img, cmap='gray')
+        else:  # RGB image
+            ax.imshow(img, cmap='gray')
+        ax.set_title(title)
+        ax.axis('off')
+
+    plt.suptitle("End-to-End Optimization")
+    # Save the figure
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_path = f"{base_path}_reconstructions_{timestamp}.png"
+    plt.savefig(save_path, bbox_inches='tight')
+    plt.close(fig)
+
     return batch, batch_all
 
 @baseline_registry.register_obs_transformer()

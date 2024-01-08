@@ -87,7 +87,7 @@ class GrayScale(ObservationTransformer):
 
         self.counter_image = 0
 
-        self.backgroundMasking = True
+        self.backgroundMasking = False
         self.distance = 0.25 # Real distance in meters is about this value times 10
         self.overrideDepth = True
 
@@ -156,7 +156,7 @@ class GrayScale(ObservationTransformer):
 
     def maskImagesDepth(self, images, depth_maps, distance):
         """
-        Mask images based on depth maps.
+        Mask images based on depth maps, blurring parts of the image further than a specified distance.
 
         :param images: Tensor of shape (x, 256, 256, 1) representing images.
         :param depth_maps: Tensor of shape (x, 256, 256, 1) representing depth maps.
@@ -165,8 +165,14 @@ class GrayScale(ObservationTransformer):
         """
         masked_images = torch.clone(images)
         for i in range(images.shape[0]):
-            mask = depth_maps[i] <= distance  # Create a mask where depth is less than or equal to distance
-            masked_images[i] = images[i] * mask  # Apply the mask to the image
+            # Convert to numpy and blur the entire image
+            blurred_image = cv2.GaussianBlur(images[i].cpu().numpy(), (35, 35), 0)
+
+            # Create a mask where depth is less than or equal to the specified distance
+            mask = (depth_maps[i] <= distance).cpu().numpy().astype(np.uint8)
+
+            # Combine original and blurred image based on the mask
+            masked_images[i] = torch.tensor((mask * images[i].cpu().numpy()) + ((1 - mask) * blurred_image))
 
         return masked_images
 
