@@ -36,15 +36,29 @@ def overwrite_gym_box_shape(box: Box, shape) -> Box:
 
 @baseline_registry.register_obs_transformer()
 class GrayScale(ObservationTransformer):
-    def __init__(self):
+    def __init__(self): #, resize_needed):
         super().__init__()
         self.transformed_sensor = 'rgb'
+
+        self.counter_image = 0
+
+        self.backgroundMasking = False
+        self.distance = 0.3 # Real distance in meters is about this value times 10
+        self.overrideDepth = False
+
+        # self.resize_needed = resize_needed
 
     def forward(self, observations: Dict[str, torch.Tensor]
                 ) -> Dict[str, torch.Tensor]:
         if self.transformed_sensor in observations:
-            observations[self.transformed_sensor] = self._transform_obs(
-                observations[self.transformed_sensor])
+            if self.backgroundMasking == True:
+                maskingImages = self.maskImagesDepth(observations["rgb"], observations["depth"], self.distance)
+                observations[self.transformed_sensor] = self._transform_obs(maskingImages)
+                if self.overrideDepth:
+                    observations["depth"] = self.override_with_ones_mask(observations["depth"])
+            else:
+                observations[self.transformed_sensor] = self._transform_obs(
+                    observations[self.transformed_sensor])
         return observations
 
     @staticmethod
@@ -64,6 +78,10 @@ class GrayScale(ObservationTransformer):
 
         return observation
 
+    @classmethod
+    def from_config(cls, config: get_config):
+        return cls()
+
     def transform_observation_space(self, observation_space: spaces.Dict,
                                     **kwargs):
         key = self.transformed_sensor
@@ -76,10 +94,37 @@ class GrayScale(ObservationTransformer):
             observation_space[key], new_shape)
         return observation_space
 
-    @classmethod
-    def from_config(cls, config: get_config):
-        # c = config.rl.policy.obs_transform.GrayScale
-        return cls()
+    def maskImagesDepth(self, images, depth_maps, distance):
+        """
+        Mask images based on depth maps, blurring parts of the image further than a specified distance.
+
+        :param images: Tensor of shape (x, 256, 256, 1) representing images.
+        :param depth_maps: Tensor of shape (x, 256, 256, 1) representing depth maps.
+        :param distance: Threshold distance for masking.
+        :return: Masked images tensor.
+        """
+        masked_images = torch.clone(images)
+        for i in range(images.shape[0]):
+            # Convert to numpy and blur the entire image
+            blurred_image = cv2.GaussianBlur(images[i].cpu().numpy(), (35, 35), 0)
+
+            # Create a mask where depth is less than or equal to the specified distance
+            mask = (depth_maps[i] <= distance).cpu().numpy().astype(np.uint8)
+
+            # Combine original and blurred image based on the mask
+            masked_images[i] = torch.tensor((mask * images[i].cpu().numpy()) + ((1 - mask) * blurred_image))
+
+        return masked_images
+
+    def override_with_ones_mask(self, depth_tensor):
+        """
+        Override a depth tensor with a mask of ones.
+
+        :param depth_tensor: A tensor representing the depth maps.
+        :return: A tensor of the same shape as depth_tensor, filled with ones.
+        """
+        ones_mask = torch.ones_like(depth_tensor)
+        return ones_mask
 
 
 @baseline_registry.register_obs_transformer()
@@ -471,6 +516,74 @@ class SegmentationCV2(ObservationTransformer):
         observations = torch.as_tensor(np.array(frames, 'uint8'), device=device)
 
         return observations
+
+
+@baseline_registry.register_obs_transformer()
+class IttiSaliencyDetection(ObservationTransformer):
+    def __init__(self, percentile_value, sigma, threshold_low, threshold_high):
+        # Pipeline of this transformation is Gray, Canny, Itti
+        super().__init__()
+        self.sm = pySaliencyMap.pySaliencyMap(256, 256)
+
+        self.percentile_value = percentile_value
+        self.threshold_low = threshold_low
+        self.threshold_high = threshold_high
+        self.sigma = sigma
+
+        self.transformed_sensor = 'rgb'
+
+    @classmethod
+    def from_config(cls, config: get_config):
+        return cls(config.percentile_value, config.sigma, config.threshold_low, config.threshold_high)
+
+    def forward(self, observations: Dict[str, torch.Tensor]
+                ) -> Dict[str, torch.Tensor]:
+        key = self.transformed_sensor
+        if key in observations:
+            observations[key] = self._transform_obs(observations[key])
+        return observations
+
+    def _transform_obs(self, observation):
+        device = observation.device
+
+        observation = observation.cpu().numpy()
+
+        frames = []
+        for frame in observation:
+            saliency_map = self.sm.SMGetSM(frame)
+
+            # Gray + Canny
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            frame = cv2.GaussianBlur(frame, ksize=None, sigmaX=self.sigma)
+            frame = cv2.Canny(frame, self.threshold_low, self.threshold_high)
+
+            frame = self.get_saliencyMasked_image(frame, saliency_map, self.percentile_value)
+
+            frames.append(frame)
+        # frames.append(np.tile(np.expand_dims(maskedObservation, -1), 3))
+
+        observations = torch.as_tensor(np.array(frames, 'uint8'), device=device)
+
+        return observations
+
+    def get_saliencyMasked_image(self, img, saliency_map, percentile_value):
+        # Re-scale saliency mask to get appropriate darkening coefficients
+        saliency_map = cv2.normalize(saliency_map, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
+        saliency_map = saliency_map.astype(np.uint8)
+
+        threshold_value = np.percentile(saliency_map, percentile_value)
+        _, binary_map = cv2.threshold(saliency_map, threshold_value, 255, cv2.THRESH_BINARY)
+
+        contours, _ = cv2.findContours(binary_map, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        mask = np.zeros_like(saliency_map)
+        cv2.drawContours(mask, contours, -1, (255), thickness=cv2.FILLED)
+
+        background_image = np.zeros_like(img)
+        salient_image = cv2.bitwise_and(img, img, mask=mask)
+        combined_image = cv2.add(salient_image, background_image)
+
+        return combined_image
 
 
 def gaussian_blur(img, kernel=(5, 5)):

@@ -9,9 +9,7 @@ import phosphenes
 
 def main():
     # DISPLAY =:11.0
-    os.environ['CUDA_VISIBLE_DEVICES'] = '8'
-    # os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
-    # os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
     os.chdir(Path('~/Internship/PyCharm_projects/habitat_2.3/habitat-lab/').expanduser())
 
