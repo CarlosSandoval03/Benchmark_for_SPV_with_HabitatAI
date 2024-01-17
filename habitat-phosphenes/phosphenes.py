@@ -1,4 +1,5 @@
 import copy
+import datetime
 from typing import Dict
 
 import cv2
@@ -42,9 +43,9 @@ class GrayScale(ObservationTransformer):
 
         self.counter_image = 0
 
-        self.backgroundMasking = False
+        self.backgroundMasking = True
         self.distance = 0.3 # Real distance in meters is about this value times 10
-        self.overrideDepth = False
+        self.overrideDepth = True
 
         # self.resize_needed = resize_needed
 
@@ -66,12 +67,27 @@ class GrayScale(ObservationTransformer):
         device = observation.device
 
         observation = observation.cpu().numpy()
+        # base_path = "/scratch/big/home/carsan/Internship/PyCharm_projects/habitat_2.3/habitat-phosphenes/backgroundDepthPhos"
 
         frames = []
         for frame in observation:
+            # timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            # plt.figure()
+            # plt.imshow(frame)
+            # plt.axis('off')
+            # plt.savefig(f"{base_path}/phos_{timestamp}.png", dpi=300, bbox_inches='tight')
+            # plt.close()
+
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
             frames.append(frame)
+
+            # timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            # plt.figure()
+            # plt.imshow(frame, cmap="gray")
+            # plt.axis('off')
+            # plt.savefig(f"{base_path}/phos_{timestamp}.png", dpi=300, bbox_inches='tight')
+            # plt.close()
 
         observation = torch.as_tensor(np.expand_dims(frames, -1),
                                       device=device)
@@ -216,6 +232,14 @@ class Phosphenes(ObservationTransformer):
 
             phosphenes = 255 * phosphenes / (phosphenes.max() or 1)
             frames.append(np.tile(np.expand_dims(phosphenes, -1), 3))
+
+            # timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            # base_path = "/scratch/big/home/carsan/Internship/PyCharm_projects/habitat_2.3/habitat-phosphenes/backgroundDepthPhos"
+            # plt.figure()
+            # plt.axis('off')
+            # plt.imshow(phosphenes, cmap="gray")
+            # plt.savefig(f"{base_path}/phos_{timestamp}.png", dpi=300, bbox_inches='tight')
+            # plt.close()
 
         phosphenes = torch.as_tensor(np.array(frames, 'uint8'), device=device)
 
@@ -493,20 +517,34 @@ class SegmentationCV2(ObservationTransformer):
         for frame in observation:
             if frame is not None:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
                 # Apply adaptive thresholding
                 thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                               cv2.THRESH_BINARY, 11, 2)
-                # Find contours
-                contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+                                               cv2.THRESH_BINARY, 71, 5)
+
+                # Apply canny detection with high thresholds
+                edges = cv2.Canny(cv2.GaussianBlur(gray, ksize=None, sigmaX=3), 20, 40)
+
+                # Closing operation
+                kernelsize = (3, 3)
+                kernel = cv2.getStructuringElement(cv2.MORPH_RECT, kernelsize)
+                bin_imgThresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+                # Find contours for both
+                contoursThresh, _ = cv2.findContours(bin_imgThresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+                contoursCanny, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_TC89_L1)
 
                 # Filter contours
-                threshold_area = 900
-                filtered_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > threshold_area]
+                threshold_area = 300  # Set to 800
+                filtered_contoursThresh = [cnt for cnt in contoursThresh if cv2.contourArea(cnt) > threshold_area]
+                threshold_area = 10  # Set to 800
+                filtered_contoursCanny = [cnt for cnt in contoursCanny if cv2.contourArea(cnt) > threshold_area]
 
                 # Draw contours on the original image
                 height, width, channels = frame.shape
                 zero_image = np.zeros((height, width), dtype=np.uint8)
-                cv2.drawContours(zero_image, filtered_contours, -1, (255, 255, 255), 1)
+                cv2.drawContours(zero_image, filtered_contoursCanny, -1, (255, 255, 255), 1)
+                cv2.drawContours(zero_image, filtered_contoursThresh, -1, (255, 255, 255), 1)
             else:
                 raise Exception("The image observation does not exist.")
 
